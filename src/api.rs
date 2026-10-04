@@ -110,7 +110,7 @@ pub async fn serve(
             }
             _ = connections.join_next(), if !connections.is_empty() => {}
             changed = shutdown.changed() => {
-                if changed.is_ok() && *shutdown.borrow() { break; }
+                if changed.is_ok() && *shutdown.borrow() { break Ok(()); }
             }
         }
     }
