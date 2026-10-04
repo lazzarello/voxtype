@@ -859,6 +859,9 @@ pub struct Daemon {
     // instance (#643) — get_transcriber_for_recording re-creates it on the
     // next recording when it finds this empty.
     transcriber_preloaded: Option<Arc<dyn Transcriber>>,
+    // API listener task (disabled unless [api].enabled is true).
+    api_task: Option<tokio::task::JoinHandle<()>>,
+    api_shutdown: Option<tokio::sync::watch::Sender<bool>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -987,6 +990,8 @@ impl Daemon {
             transcription_task: None,
             active_transcriber: None,
             transcriber_preloaded: None,
+            api_task: None,
+            api_shutdown: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -3287,6 +3292,33 @@ impl Daemon {
 
         self.model_manager = Some(model_manager);
 
+        if self.config.api.enabled {
+            let Some(transcriber) = self.transcriber_preloaded.clone() else {
+                return Err(crate::error::VoxtypeError::Config(
+                    "[api] enabled requires a resident streaming transcriber; disable on_demand_loading and enable engine streaming".into(),
+                ));
+            };
+            if transcriber.as_streaming().is_none() {
+                return Err(crate::error::VoxtypeError::Config(
+                    "[api] enabled requires engine streaming = true".into(),
+                ));
+            }
+            {
+                let bind = self.config.api.bind.clone();
+                let max_secs = self.config.api.max_session_secs;
+                let text = self.config.text.clone();
+                let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                self.api_shutdown = Some(shutdown_tx);
+                self.api_task = Some(tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::api::serve(&bind, max_secs, transcriber, text, shutdown_rx).await
+                    {
+                        tracing::error!("API listener stopped: {}", e);
+                    }
+                }));
+            }
+        }
+
         // Start hotkey listener (if enabled)
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
@@ -4581,6 +4613,13 @@ impl Daemon {
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = hotkey_listener; // Silence unused variable warning
+
+        if let Some(shutdown) = self.api_shutdown.take() {
+            let _ = shutdown.send(true);
+        }
+        if let Some(task) = self.api_task.take() {
+            let _ = task.await;
+        }
 
         // Abort any pending transcription task
         if let Some(task) = self.transcription_task.take() {

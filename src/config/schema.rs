@@ -38,6 +38,7 @@ pub const SECTIONS: &[&str] = &[
     "Engine",
     "Hotkey",
     "Audio",
+    "API",
     "Output",
     "Text",
     "VAD",
@@ -799,6 +800,34 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Hotkey",
         "Secondary-model modifier",
         "Hold this alongside the hotkey to transcribe with whisper.secondary_model.",
+    ),
+    // -- API ----------------------------------------------------------------
+    spec(
+        "api.enabled",
+        "api",
+        "enabled",
+        KeyType::Bool,
+        "API",
+        "Enable WebSocket API",
+        "Enable the local streaming transcription WebSocket API.",
+    ),
+    spec(
+        "api.bind",
+        "api",
+        "bind",
+        KeyType::String,
+        "API",
+        "Bind address",
+        "Loopback, private-network, or Tailscale address for the WebSocket API.",
+    ),
+    spec(
+        "api.max_session_secs",
+        "api",
+        "max_session_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "API",
+        "Maximum session duration",
+        "Maximum duration of one API streaming session in seconds.",
     ),
     // -- Audio --------------------------------------------------------------
     spec(
@@ -1772,6 +1801,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
+
+        "api.enabled" => json!(cfg.api.enabled),
+        "api.bind" => json!(cfg.api.bind),
+        "api.max_session_secs" => json!(cfg.api.max_session_secs),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),

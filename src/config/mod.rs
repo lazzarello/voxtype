@@ -6,6 +6,7 @@
 //! 3. Environment variables (VOXTYPE_*)
 //! 4. CLI arguments (highest priority)
 
+mod api;
 mod audio;
 mod default_config;
 mod engines;
@@ -25,6 +26,7 @@ pub(crate) mod text;
 mod vad;
 mod whisper;
 
+pub use api::ApiConfig;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{

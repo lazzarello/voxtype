@@ -1,8 +1,8 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    ApiConfig, AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig,
+    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
+    ParakeetConfig, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig,
+    TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +19,8 @@ pub struct Config {
     pub hotkey: HotkeyConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub api: ApiConfig,
     #[serde(default)]
     pub whisper: WhisperConfig,
     #[serde(default)]
@@ -115,6 +117,7 @@ impl Default for Config {
         Self {
             hotkey: HotkeyConfig::default(),
             audio: AudioConfig::default(),
+            api: ApiConfig::default(),
             whisper: WhisperConfig::default(),
             output: OutputConfig::default(),
             engine: TranscriptionEngine::default(),

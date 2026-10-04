@@ -38,6 +38,12 @@ modifiers = []
 # Example: model_modifier = "LEFTSHIFT"  # Shift+hotkey uses secondary model
 # model_modifier = "LEFTSHIFT"
 
+[api]
+# Disabled by default; enables the local WebSocket transcription API.
+# enabled = false
+# bind = "127.0.0.1:8765"
+# max_session_secs = 60
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: voxtype info devices
