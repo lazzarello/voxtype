@@ -1,0 +1,172 @@
+# Voxtype Configuration
+#
+# Location: ~/.config/voxtype/config.toml
+# All settings can be overridden via CLI flags
+#
+# State file for external integrations (Waybar, polybar, etc.)
+# Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state),
+# a custom path, or "disabled" to turn off. The daemon writes state
+# ("idle", "recording", "transcribing") to this file whenever it changes.
+# Required for `voxtype record toggle` and `voxtype status` commands.
+state_file = "disabled"
+engine = "whisper"
+
+[hotkey]
+# Voxtype's own evdev hotkey handles push-to-talk.
+#
+# On Omarchy this was disabled because Hyprland bound press and release
+# separately (binddr). Niri 26.04 has no on-release binding -- it supports
+# repeat= and cooldown-ms= but nothing that fires on key release -- so
+# push-to-talk cannot be expressed as a Niri keybind. Voxtype reads evdev
+# directly, which is why `lee` is in the input group, so let it own the
+# hold-to-talk key and use Niri only for the toggle binding.
+enabled = false
+# F9, matching the Omarchy/Hyprland binding. This ThinkPad has no ScrollLock
+# key, which was voxtype's own default.
+key = "F9"
+mode = "push_to_talk"
+
+[audio]
+
+# Pause MPRIS media players during recording
+pause_media = true
+# Audio input device ("default" uses system default)
+# List devices with: pactl list sources short
+device = "default"
+
+# Sample rate in Hz (whisper expects 16000)
+sample_rate = 16000
+
+# Maximum recording duration in seconds (safety limit)
+max_duration_secs = 60
+
+# [audio.feedback]
+# Enable audio feedback sounds (beeps when recording starts/stops)
+# enabled = true
+#
+# Sound theme: "default", "subtle", "mechanical", or path to custom theme directory
+# theme = "default"
+#
+# Volume level (0.0 to 1.0)
+# volume = 0.7
+
+[whisper]
+# Model to use for transcription
+# Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo
+# .en models are English-only but faster and more accurate for English
+# large-v3-turbo is faster than large-v3 with minimal accuracy loss (recommended for GPU)
+# Or provide absolute path to a custom .bin model file
+# base.en rather than large-v3-turbo.
+#
+# The copied config came from a machine with CUDA. Here Whisper runs on the
+# Intel iGPU via Vulkan, where large-v3-turbo took 25-55s for a 6s clip --
+# unusable for dictation. base.en is ~11x smaller and English-only, which suits
+# this use. large-v3-turbo is still installed if a transcript is worth waiting
+# for; switch with `voxtype config set whisper.model large-v3-turbo`.
+model = "base.en"
+
+# Language for transcription
+# Use "en" for English, "auto" for auto-detection
+# See: https://github.com/openai/whisper#available-models-and-languages
+language = "en"
+
+# Translate non-English speech to English
+translate = false
+streaming = true
+mode = "local"
+flash_attention = false
+on_demand_loading = false
+gpu_isolation = false
+
+# Number of CPU threads for inference (omit for auto-detection)
+# threads = 4
+
+[api]
+enabled = true
+bind = "127.0.0.1:8765"
+max_session_secs = 60
+
+[output]
+# Primary output mode: "type" or "clipboard"
+# - type: Simulates keyboard input at cursor position (requires ydotool)
+# - clipboard: Copies text to clipboard (requires wl-copy)
+mode = "type"
+
+# No compositor integration hooks.
+#
+# `voxtype setup compositor` supports hyprland, sway and river -- not niri --
+# and its hooks shell out to that compositor's IPC (e.g. `swaymsg mode ...`) to
+# suppress modifier keys while text is typed. On niri those commands do not
+# exist, the hook fails with ENOENT, and voxtype then reports every output
+# backend as "not available" even though wtype and wl-copy work fine.
+#
+# The key-repeat problem those hooks exist to solve is handled in
+# ~/.config/niri/config.kdl instead, by binding F9 to a no-op so niri consumes
+# the key rather than forwarding it to the focused window.
+
+# Fall back to clipboard if typing fails
+fallback_to_clipboard = true
+
+# Delay between typed characters in milliseconds
+# 0 = fastest possible, increase if characters are dropped
+type_delay_ms = 1
+auto_submit = false
+shift_enter_newlines = false
+pre_type_delay_ms = 0
+
+# Post-processing command (optional)
+# Pipe transcribed text through an external command for cleanup before output.
+# The command receives text on stdin and outputs processed text on stdout.
+# Useful for LLM-based text cleanup, grammar correction, filler word removal.
+# On any failure (timeout, error), falls back to original transcription.
+#
+# [output.post_process]
+# command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words. Output only the cleaned text:'"
+# timeout_ms = 30000  # 30 second timeout (generous for LLM)
+
+[output.notification]
+# Show notification when recording starts (hotkey pressed)
+on_recording_start = false
+
+# Show notification when recording stops (transcription beginning)
+on_recording_stop = false
+
+# Show notification with transcribed text after transcription completes
+on_transcription = false
+
+[text]
+spoken_punctuation = false
+smart_auto_submit = false
+
+[meeting]
+enabled = true
+
+[meeting.diarization]
+enabled = false
+
+[meeting.audio]
+source = "both"
+
+# [text]
+# Text processing options (word replacements, spoken punctuation)
+#
+# Enable spoken punctuation conversion (e.g., say "period" to get ".")
+# spoken_punctuation = false
+#
+# Custom word replacements (case-insensitive)
+# replacements = { "hyperwhisper" = "hyprwhspr" }
+
+[osd]
+enabled = false
+# On-screen display frontend. Pinned explicitly rather than left to the
+# default, for two reasons:
+#
+# 1. The main voxtype package ships only the `voxtype-osd` launcher, which
+#    execs into a separate frontend package. Without one installed the launcher
+#    fell back to quickshell, could not find its shell.qml, and crash-looped
+#    until the daemon gave up. voxtype.nix now installs osd-gtk4.
+#
+# 2. The quickshell frontend's `palette` option defaults to reading colors from
+#    ~/.config/omarchy/current/theme/colors.toml. That Omarchy coupling is what
+#    this migration is removing, so avoid that frontend entirely.
+frontend = "gtk4"

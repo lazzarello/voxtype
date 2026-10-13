@@ -862,6 +862,9 @@ pub struct Daemon {
     // API listener task (disabled unless [api].enabled is true).
     api_task: Option<tokio::task::JoinHandle<()>>,
     api_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// One lease arbitrates local recordings and API sessions.
+    session_gate: std::sync::Arc<tokio::sync::Semaphore>,
+    session_lease: Option<tokio::sync::OwnedSemaphorePermit>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -992,6 +995,8 @@ impl Daemon {
             transcriber_preloaded: None,
             api_task: None,
             api_shutdown: None,
+            session_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            session_lease: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -1142,6 +1147,12 @@ impl Daemon {
         &mut self,
         track_silence: bool,
     ) -> std::result::Result<Box<dyn AudioCapture>, ()> {
+        if self.session_lease.is_none() {
+            self.session_lease = match self.session_gate.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => return Err(()),
+            };
+        }
         // A `record cancel` issued while idle leaves its trigger file behind,
         // and the idle-time sweep that was meant to consume it never runs:
         // its 500ms timer sits in a select! loop whose unconditional 100ms
@@ -1185,12 +1196,14 @@ impl Daemon {
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
                     self.play_feedback(SoundEvent::Error);
+                    self.session_lease = None;
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
                 self.play_feedback(SoundEvent::Error);
+                self.session_lease = None;
                 Err(())
             }
         }
@@ -1260,6 +1273,12 @@ impl Daemon {
         model_override: Option<String>,
         track_silence: bool,
     ) -> bool {
+        if self.session_lease.is_none() {
+            self.session_lease = match self.session_gate.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => return false,
+            };
+        }
         // Same stale-trigger hazard as start_recording_capture: Streaming is
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
@@ -1284,6 +1303,7 @@ impl Daemon {
             Err(e) => {
                 tracing::error!("Failed to start streaming session: {}", e);
                 self.play_feedback(SoundEvent::Error);
+                self.session_lease = None;
                 // Drop the capture cleanly; ignore final samples.
                 let mut c = capture;
                 let _ = c.stop().await;
@@ -1459,6 +1479,7 @@ impl Daemon {
                 Err(()) => {
                     *state = State::Idle;
                     self.update_state("idle");
+                    self.session_lease = None;
                     return;
                 }
             };
@@ -1603,6 +1624,7 @@ impl Daemon {
 
             *state = State::Idle;
             self.update_state("idle");
+            self.session_lease = None;
             return;
         }
 
@@ -1619,6 +1641,7 @@ impl Daemon {
 
         *state = State::Idle;
         self.update_state("idle");
+        self.session_lease = None;
     }
 
     /// Cancel an active streaming session: signal the backend, drop capture,
@@ -1663,6 +1686,7 @@ impl Daemon {
         cleanup_bool_override("smart_auto_submit");
         *state = State::Idle;
         self.update_state("idle");
+        self.session_lease = None;
         self.play_feedback(SoundEvent::Cancelled);
 
         if let Some(cmd) = &self.config.output.post_output_command {
@@ -2278,6 +2302,7 @@ impl Daemon {
         self.restore_recording_media();
         *state = State::Idle;
         self.update_state("idle");
+        self.session_lease = None;
 
         // Run post_output_command to reset compositor submap
         if let Some(cmd) = &self.config.output.post_output_command {
@@ -3307,11 +3332,19 @@ impl Daemon {
                 let bind = self.config.api.bind.clone();
                 let max_secs = self.config.api.max_session_secs;
                 let text = self.config.text.clone();
+                let session_gate = self.session_gate.clone();
                 let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
                 self.api_shutdown = Some(shutdown_tx);
                 self.api_task = Some(tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::api::serve(&bind, max_secs, transcriber, text, shutdown_rx).await
+                    if let Err(e) = crate::api::serve(
+                        &bind,
+                        max_secs,
+                        transcriber,
+                        text,
+                        shutdown_rx,
+                        session_gate,
+                    )
+                    .await
                     {
                         tracing::error!("API listener stopped: {}", e);
                     }

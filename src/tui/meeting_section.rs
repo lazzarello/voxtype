@@ -43,7 +43,12 @@ impl MeetingState {
                 .get_bool("meeting.diarization", "enabled")
                 .unwrap_or(false),
             audio_source: ed
-                .get_string("meeting.audio", "source")
+                .get_string("meeting.audio", "loopback_device")
+                .or_else(|| ed.get_string("meeting.audio", "source"))
+                .map(|source| match source.as_str() {
+                    "disabled" | "mic" => "mic".to_string(),
+                    _ => "both".to_string(),
+                })
                 .unwrap_or_else(|| "mic".to_string()),
             field: Field::Enabled,
             feedback: None,
@@ -60,7 +65,16 @@ impl MeetingState {
         };
         ed.set_bool("meeting", "enabled", self.enabled);
         ed.set_bool("meeting.diarization", "enabled", self.diarization_enabled);
-        ed.set_string("meeting.audio", "source", &self.audio_source);
+        ed.set_string(
+            "meeting.audio",
+            "loopback_device",
+            if self.audio_source == "mic" {
+                "disabled"
+            } else {
+                "auto"
+            },
+        );
+        ed.unset("meeting.audio", "source");
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;

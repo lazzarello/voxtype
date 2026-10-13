@@ -22,9 +22,8 @@
 //! pipeline (that lives in the multitalker / EOU model). Until we add VAD-
 //! based segmentation, this implementation:
 //!
-//! - emits one [`StreamingEvent::Partial`] per audio chunk with the
-//!   *cumulative* transcript so far;
-//! - emits exactly one [`StreamingEvent::Final`] with the flushed text on
+//! - emits one [`StreamingEvent::Partial`] delta per audio chunk;
+//! - emits exactly one [`StreamingEvent::Final`] delta with the flushed text on
 //!   stream close (samples sender dropped or cancel signal);
 //! - emits exactly one [`StreamingEvent::Ended`] last.
 //!
@@ -40,6 +39,32 @@ use crate::error::TranscribeError;
 use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
 use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
+
+fn cumulative_delta(
+    previous: &str,
+    current: &str,
+    segment_id: u64,
+    final_: bool,
+) -> StreamingEvent {
+    let common = previous
+        .chars()
+        .zip(current.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let removed = previous.chars().count() - common;
+    let text: String = current.chars().skip(common).collect();
+    if removed > 0 {
+        StreamingEvent::Replace {
+            backspace: removed,
+            text,
+            segment_id,
+        }
+    } else if final_ {
+        StreamingEvent::Final { text, segment_id }
+    } else {
+        StreamingEvent::Partial { text, segment_id }
+    }
+}
 
 /// Streaming-capable Parakeet transcriber backed by `ParakeetUnified`.
 pub struct ParakeetStreamingTranscriber {
@@ -251,9 +276,9 @@ impl StreamingTranscriber for ParakeetStreamingTranscriber {
                 };
 
                 if text != last_text {
+                    let delta = cumulative_delta(&last_text, &text, segment_id, false);
                     last_text = text.clone();
-                    let _ = runtime
-                        .block_on(events_tx.send(StreamingEvent::Partial { text, segment_id }));
+                    let _ = runtime.block_on(events_tx.send(delta));
                 }
             }
 
@@ -267,10 +292,8 @@ impl StreamingTranscriber for ParakeetStreamingTranscriber {
             };
 
             if !final_text.is_empty() {
-                let _ = runtime.block_on(events_tx.send(StreamingEvent::Final {
-                    text: final_text,
-                    segment_id,
-                }));
+                let final_event = cumulative_delta(&last_text, &final_text, segment_id, true);
+                let _ = runtime.block_on(events_tx.send(final_event));
             }
             let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
             Ok(())

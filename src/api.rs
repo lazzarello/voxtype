@@ -49,18 +49,19 @@ struct Snapshot {
     revision: u64,
 }
 impl Snapshot {
+    // Backend events carry deltas; Replace revises the already-emitted tail.
     fn append(&mut self, s: &str) {
         self.provisional.push_str(s);
     }
     fn finish_segment(&mut self, s: &str) {
-        self.committed.push_str(&self.provisional);
-        self.provisional.clear();
-        self.committed.push_str(s);
+        self.provisional.push_str(s);
     }
     fn replace(&mut self, n: usize, s: &str) {
-        let keep = self.provisional.chars().count().saturating_sub(n);
-        self.provisional = self.provisional.chars().take(keep).collect();
+        let text = self.text();
+        let keep = text.chars().count().saturating_sub(n);
+        self.provisional = text.chars().take(keep).collect();
         self.provisional.push_str(s);
+        self.committed.clear();
     }
     fn text(&self) -> String {
         format!("{}{}", self.committed, self.provisional)
@@ -89,12 +90,12 @@ pub async fn serve(
     transcriber: Arc<dyn Transcriber>,
     text_config: crate::config::TextConfig,
     mut shutdown: watch::Receiver<bool>,
+    sessions: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse()?;
     anyhow::ensure!(allowed(addr), "refusing non-private API bind address");
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "WebSocket API listening");
-    let sessions = Arc::new(Semaphore::new(1));
     let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
@@ -110,10 +111,12 @@ pub async fn serve(
             }
             _ = connections.join_next(), if !connections.is_empty() => {}
             changed = shutdown.changed() => {
-                if changed.is_ok() && *shutdown.borrow() { break Ok(()); }
+                if changed.is_ok() && *shutdown.borrow() { break; }
             }
         }
     }
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 async fn connection(
@@ -124,28 +127,37 @@ async fn connection(
     max_secs: u32,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let ws = accept_hdr_async_with_config(
-        stream,
-        |r: &Request, response: Response| {
-            if r.uri().path() == "/v1/stream" {
-                Ok(response)
-            } else {
-                Err(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Some("not found".into()))
-                    .unwrap())
-            }
-        },
-        Some(WebSocketConfig {
-            max_message_size: Some(64 * 1024),
-            max_frame_size: Some(64 * 1024),
-            ..Default::default()
-        }),
+    let ws = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        accept_hdr_async_with_config(
+            stream,
+            |r: &Request, response: Response| {
+                if r.uri().path() == "/v1/stream" {
+                    Ok(response)
+                } else {
+                    Err(Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Some("not found".into()))
+                        .unwrap())
+                }
+            },
+            Some(WebSocketConfig {
+                max_message_size: Some(64 * 1024),
+                max_frame_size: Some(64 * 1024),
+                ..Default::default()
+            }),
+        ),
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => return Ok(()),
+    };
     let (mut sink, mut input) = ws.split();
-    let Some(Ok(Message::Text(first))) = input.next().await else {
-        return Ok(());
+    let first = match tokio::time::timeout(std::time::Duration::from_secs(5), input.next()).await {
+        Ok(Some(Ok(Message::Text(first)))) => first,
+        Ok(Some(Err(error))) => return Err(error.into()),
+        _ => return Ok(()),
     };
     let Ok(ClientMessage::Start { protocol, audio }) = serde_json::from_str(&first) else {
         send_error(&mut sink, "bad_request", "first message must be start").await?;
@@ -207,17 +219,17 @@ async fn connection(
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     let _ = send_error(&mut sink, "server_shutdown", "server is shutting down").await;
-                    audio_tx = None;
+                    drop(audio_tx.take());
                     let _ = cancel.take().map(|tx| tx.send(()));
                     break;
                 }
             }
-            _ = &mut deadline => { send_error(&mut sink, "session_timeout", "session exceeded maximum duration").await?; audio_tx = None; let _ = cancel.take().map(|tx| tx.send(())); break; }
-            msg = input.next() => { let Some(msg) = msg else { audio_tx = None; let _ = cancel.take().map(|tx| tx.send(())); break }; match msg? {
-                Message::Binary(b) => { if b.len() > 64*1024 { send_error(&mut sink,"bad_request","audio message too large").await?; audio_tx = None; let _=cancel.take().map(|tx| tx.send(())); break } let samples=decoder.push(&b); if !samples.is_empty() && audio_tx.as_ref().is_some_and(|tx| tx.try_send(samples).is_err()) { send_error(&mut sink,"audio_overrun","audio queue is full").await?; audio_tx = None; let _=cancel.take().map(|tx| tx.send(())); break } }
-                Message::Text(t) => match serde_json::from_str::<ClientMessage>(&t) { Ok(ClientMessage::Stop) => { if decoder.odd { send_error(&mut sink,"bad_request","odd trailing PCM byte").await?; audio_tx = None; let _=cancel.take().map(|tx| tx.send(())); break } audio_tx=None; }, Ok(ClientMessage::Cancel) => { audio_tx = None; let _=cancel.take().map(|tx| tx.send(())); break }, Ok(ClientMessage::Ping) => { sink.send(json(ServerMessage::Pong)?).await?; }, _ => { send_error(&mut sink,"bad_request","unexpected message").await?; } }, Message::Close(_) => { audio_tx = None; let _=cancel.take().map(|tx| tx.send(())); break }, _ => {} }
+            _ = &mut deadline => { send_error(&mut sink, "session_timeout", "session exceeded maximum duration").await?; drop(audio_tx.take()); let _ = cancel.take().map(|tx| tx.send(())); break; }
+            msg = input.next() => { let Some(msg) = msg else { drop(audio_tx.take()); let _ = cancel.take().map(|tx| tx.send(())); break }; match msg? {
+                Message::Binary(b) => { if b.len() > 64*1024 { send_error(&mut sink,"bad_request","audio message too large").await?; drop(audio_tx.take()); let _=cancel.take().map(|tx| tx.send(())); break } let samples=decoder.push(&b); if !samples.is_empty() && audio_tx.as_ref().is_some_and(|tx| tx.try_send(samples).is_err()) { send_error(&mut sink,"audio_overrun","audio queue is full").await?; drop(audio_tx.take()); let _=cancel.take().map(|tx| tx.send(())); break } }
+                Message::Text(t) => match serde_json::from_str::<ClientMessage>(&t) { Ok(ClientMessage::Stop) => { if decoder.odd { send_error(&mut sink,"bad_request","odd trailing PCM byte").await?; drop(audio_tx.take()); let _=cancel.take().map(|tx| tx.send(())); break } drop(audio_tx.take()); }, Ok(ClientMessage::Cancel) => { drop(audio_tx.take()); let _=cancel.take().map(|tx| tx.send(())); break }, Ok(ClientMessage::Ping) => { sink.send(json(ServerMessage::Pong)?).await?; }, _ => { send_error(&mut sink,"bad_request","unexpected message").await?; } }, Message::Close(_) => { drop(audio_tx.take()); let _=cancel.take().map(|tx| tx.send(())); break }, _ => {} }
             }
-            event = handle.events.recv() => { match event { Some(StreamingEvent::Partial{text,..}) => { snapshot.append(&text); snapshot.revision+=1; send_snapshot(&mut sink,false,&snapshot,&processor).await? }, Some(StreamingEvent::Final{text,..}) => { snapshot.finish_segment(&text); snapshot.revision+=1; send_snapshot(&mut sink,true,&snapshot,&processor).await? }, Some(StreamingEvent::Replace{backspace,text,..}) => { snapshot.replace(backspace,&text); snapshot.revision+=1; send_snapshot(&mut sink,false,&snapshot,&processor).await? }, Some(StreamingEvent::Error(_)) => { send_error(&mut sink,"transcription_failed","transcription failed").await?; audio_tx = None; let _=cancel.take().map(|tx| tx.send(())); break }, Some(StreamingEvent::Ended)|None => { snapshot.complete(); sink.send(json(ServerMessage::Complete { text: processor.process(&snapshot.text()) })?).await?; break } } }
+            event = handle.events.recv() => { match event { Some(StreamingEvent::Partial{text,segment_id}) => { let _ = segment_id; snapshot.append(&text); snapshot.revision+=1; send_snapshot(&mut sink,false,&snapshot,&processor).await? }, Some(StreamingEvent::Final{text,segment_id}) => { let _ = segment_id; snapshot.finish_segment(&text); snapshot.revision+=1; send_snapshot(&mut sink,true,&snapshot,&processor).await? }, Some(StreamingEvent::Replace{backspace,text,..}) => { snapshot.replace(backspace,&text); snapshot.revision+=1; send_snapshot(&mut sink,false,&snapshot,&processor).await? }, Some(StreamingEvent::Error(_)) => { send_error(&mut sink,"transcription_failed","transcription failed").await?; drop(audio_tx.take()); let _=cancel.take().map(|tx| tx.send(())); break }, Some(StreamingEvent::Ended)|None => { snapshot.complete(); sink.send(json(ServerMessage::Complete { text: processor.process(&snapshot.text()) })?).await?; break } } }
         }
     }
     let _ = handle.task.await;
@@ -297,10 +309,20 @@ mod tests {
     fn pcm_odd_boundary() {
         let mut d = Decoder::default();
         assert!(d.push(&[0, 1, 2]).len() == 1);
-        assert_eq!(d.push(&[3]), vec![0.0078125]);
+        assert_eq!(d.push(&[3]), vec![770.0 / 32768.0]);
     }
     #[test]
     fn bind_rejects_public() {
         assert!(!allowed("8.8.8.8:1".parse().unwrap()));
+    }
+    #[test]
+    fn snapshot_replaces_cumulative_revisions() {
+        let mut s = Snapshot::default();
+        s.append("hello");
+        s.append(" world");
+        s.finish_segment("!");
+        assert_eq!(s.text(), "hello world!");
+        s.replace(1, "?");
+        assert_eq!(s.text(), "hello world?");
     }
 }
